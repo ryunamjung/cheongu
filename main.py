@@ -1,17 +1,11 @@
-# streamlit_claim_compare_app_v4.py
+# streamlit_claim_compare_app_v6.py
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------
-# 스트림릿 앱 v4 — 요구사항 정렬판
-#  - 주석(설명) 그대로 노출
-#  - XLSX 다중 업로드, 파일명에서 월 인식(1~12월)
-#  - 최신월(당월)과 직전월(전달) 자동 매칭
-#  - 집계 기준
-#     * 의사별 → '과목구분'
-#     * 청구/청구별(보험) → '보험구분'
-#     * 청구/청구별(입원외래) → '입원외래'
-#  - 합산 컬럼 7개 모두 더해 '청구액'으로 간주
-#  - 증감 기호: (-)→▼, (+)→▲, 0→—
-#  - 예외/진단 로그 표시
+# 스트림릿 앱 v6 — '100/100미만청구액' 합산 추가 (모든 계산/검증 포함)
+#  - 합산(청구금액) 항목: 8개
+#    본인부담상한초과 + 청구액 + 지원금 + 장애인의료비 + 보훈청구액 + 보훈감면액 + 100/100미만보훈청구 + 100/100미만청구액
+#  - 동의어 매핑에 '100/100미만청구액' 변형 추가
+#  - 나머지 로직은 v5와 동일
 # -------------------------------------------------------------
 
 import io
@@ -21,9 +15,9 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="EDI 청구통계 월별 비교 (v4)", layout="wide")
+st.set_page_config(page_title="EDI 청구통계 월별 비교 (v6)", layout="wide")
 
-# ------------------- 상단 설명(요청된 주석) -------------------
+# ------------------- 상단 설명 -------------------
 with st.expander("📌 화면 설명 (필독)", expanded=True):
     st.markdown(
         """
@@ -32,26 +26,13 @@ with st.expander("📌 화면 설명 (필독)", expanded=True):
         * 설명 = **EDI -  청구통계 - 보험구분(+), 입/외(+), 보훈등구분(+)**, 파일명은 **'청구_8월'** 이렇게 지정해야함
         
         ---
-        - xlsx 파일은 여러 개 올릴 수 있습니다.  
-        - 파일명을 비교하여 넣을 때 1월~12월 모든 가지수를 고려합니다.  
-        - 예: **의사별_9월 + 의사별_8월** → 9월(당월), 8월(전달)
+        - xlsx 파일은 여러 개 업로드 가능합니다. (1~12월 어떤 조합도 허용)  
+        - 업로드된 파일에서 **최신 월 = 당월**, 그 **직전 월 = 전달**로 자동 매칭합니다.
         
-        **비교 규칙**
-        1) 의사별:
-           - 당월: **'의사별_9월'**의 데이터를 **'과목구분'** 별로 합산하여 '청구액'으로 사용  
-           - 전달: **'의사별_8월'** 동일 집계 후 **전달비교** 칸으로 표시  
-           - 합산 항목: `본인부담상한초과 + 청구액 + 지원금 + 장애인의료비 + 보훈청구액 + 보훈감면액 + 100/100미만보훈청구`  
-           - 증감 표기: **감소(-)→▼**, **증가(+)→▲**
+        **합산 규칙(= '청구금액') — 총 8항목**
+        `본인부담상한초과 + 청구액 + 지원금 + 장애인의료비 + 보훈청구액 + 보훈감면액 + 100/100미만보훈청구 + 100/100미만청구액`
         
-        2) 청구(보험구분):
-           - 당월: **'청구별_9월'**(또는 '청구_9월')을 **'보험구분'** 별로 합산하여 '청구액'으로 사용  
-           - 전달: **'청구별_8월'**(또는 '청구_8월') 동일 집계 후 비교  
-           - 증감 표기: **감소(-)→▼**, **증가(+)→▲**
-        
-        3) 청구(입원외래):
-           - 당월: **'청구별_9월'**(또는 '청구_9월')을 **'입원외래'** 별로 합산하여 '청구액'으로 사용  
-           - 전달: **'청구별_8월'**(또는 '청구_8월') 동일 집계 후 비교  
-           - 증감 표기: **감소(-)→▼**, **증가(+)→▲**
+        **증감 표기:** 감소(-) → **▼**, 증가(+) → **▲**, 동일 → **—**
         """
     )
 
@@ -77,7 +58,6 @@ def parse_month(name: str) -> Optional[int]:
         return None
 
 def detect_kind(name: str) -> Optional[str]:
-    """의사별 / 청구(또는 청구별) 구분"""
     if "의사별" in name:
         return "doctor"
     low = name.lower()
@@ -85,13 +65,12 @@ def detect_kind(name: str) -> Optional[str]:
         return "claim"
     return None
 
-# 동의어/표기 변형 매핑
 RENAME = {
     # 집계 기준 열
     "과목구분": ["과목구분","과목","과","진료과","진료과목","진료과 구분","과코드","진료과코드"],
     "보험구분": ["보험구분","보험유형","보험 구분","보험-구분","보험_구분","보험종류"],
     "입원외래": ["입원외래","입원/외래","입/외","입외","입원-외래","입원_외래","입원 • 외래","입원 · 외래"],
-    # 합산 대상 열
+    # 합산 대상 열 (동의어/표기 변형)
     "본인부담상한초과": ["본인부담상한초과","본인부담 상한초과","본인부담-상한초과"],
     "청구액": ["청구액","총청구액","청구 금액","청구-금액"],
     "지원금": ["지원금","지원 금액"],
@@ -99,14 +78,19 @@ RENAME = {
     "보훈청구액": ["보훈청구액","보훈 청구액"],
     "보훈감면액": ["보훈감면액","보훈 감면액"],
     "100/100미만보훈청구": ["100/100미만보훈청구","100/100 미만 보훈청구","100/100미만 보훈청구"],
+    "100/100미만청구액": [
+        "100/100미만청구액","100/100 미만 청구액","100/100미만 청구액","100/100 미만청구액",
+        "100/100 미만(전체) 청구액","100/100미만(전체)청구액"
+    ],
 }
-
-SUM_COLS = ["본인부담상한초과","청구액","지원금","장애인의료비","보훈청구액","보훈감면액","100/100미만보훈청구"]
+SUM_COLS = [
+    "본인부담상한초과","청구액","지원금","장애인의료비","보훈청구액","보훈감면액",
+    "100/100미만보훈청구","100/100미만청구액"
+]
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
-    # 일치하지 않는 이름 매핑
     mapping = {}
     for target, aliases in RENAME.items():
         if target in df.columns:
@@ -158,18 +142,17 @@ def read_xlsx(uploaded) -> pd.DataFrame:
     raw = uploaded.read()
     if len(raw) < 4:
         raise ValueError(f"{uploaded.name}: 파일이 비정상적으로 작습니다.")
-    # 간단한 XLSX 서명 검사
     if raw[:2] != b"PK":
-        raise ValueError(f"{uploaded.name}: XLSX 형식이 아닐 수 있습니다. (엑셀에서 .xlsx로 다시 저장 후 업로드)")
+        raise ValueError(f"{uploaded.name}: XLSX 형식이 아닐 수 있습니다. 엑셀에서 .xlsx로 다시 저장 후 업로드하세요.")
     bio = io.BytesIO(raw)
     return pd.read_excel(bio, sheet_name=0, dtype=str, engine="openpyxl")
 
 def cat(dfs: List[pd.DataFrame]) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# ------------------- 적재: kind/month 버킷 -------------------
+# ------------------- 적재 -------------------
 buckets: Dict[str, Dict[int, List[pd.DataFrame]]] = {"doctor": {}, "claim": {}}
-log_lines: List[str] = []
+logs: List[str] = []
 
 if uploaded_files:
     for upl in uploaded_files:
@@ -179,19 +162,19 @@ if uploaded_files:
             mm = parse_month(name)
             if not kind or not mm:
                 st.warning(f"무시됨: `{name}` (종류/월 인식 실패)")
-                log_lines.append(f"무시: {name} kind={kind} mm={mm}")
+                logs.append(f"무시: {name} kind={kind} mm={mm}")
                 continue
             df_raw = read_xlsx(upl)
             df = prepare_df(df_raw)
             buckets.setdefault(kind, {}).setdefault(mm, []).append(df)
-            log_lines.append(f"인식: {name} → {kind}/{mm}월 rows={len(df)}")
+            logs.append(f"인식: {name} → {kind}/{mm}월 rows={len(df)}")
         except Exception as e:
             st.exception(e)
-            log_lines.append(f"[오류] {upl.name}: {e}")
+            logs.append(f"[오류] {upl.name}: {e}")
 
-if log_lines:
+if logs:
     with st.expander("🪵 업로드 로그", expanded=False):
-        st.code("\n".join(log_lines))
+        st.code("\n".join(logs), language="text")
 
 # ------------------- 비교 실행 UI -------------------
 st.markdown("---")
@@ -204,14 +187,13 @@ with c1:
     if not doc_months:
         st.info("의사별 파일(의사별_○월)이 없습니다.")
     else:
-        curr = max(doc_months)
-        prev_candidates = [m for m in doc_months if m < curr]
-        prev = max(prev_candidates) if prev_candidates else None
-        st.caption(f"자동 인식 → 당월: **{curr}월**, 전달: **{prev or '없음'}**")
+        curr_doc = max(doc_months)
+        prev_doc = max([m for m in doc_months if m < curr_doc], default=None)
+        st.caption(f"자동 인식 → 당월: **{curr_doc}월**, 전달: **{prev_doc or '없음'}**")
         if st.button("의사별 비교 실행", type="primary"):
             try:
-                prev_df = cat(buckets["doctor"].get(prev, []))
-                curr_df = cat(buckets["doctor"].get(curr, []))
+                prev_df = cat(buckets["doctor"].get(prev_doc, []))
+                curr_df = cat(buckets["doctor"].get(curr_doc, []))
                 if prev_df.empty or curr_df.empty:
                     st.error("의사별 비교에 필요한 월 데이터가 부족합니다.")
                 else:
@@ -228,7 +210,7 @@ with c1:
                         use_container_width=True,
                     )
                     st.session_state["out_doc"] = out
-                    st.session_state["out_doc_months"] = (prev, curr)
+                    st.session_state["out_doc_months"] = (prev_doc, curr_doc)
             except Exception as e:
                 st.exception(e)
 
@@ -239,16 +221,15 @@ with c2:
     if not claim_months:
         st.info("청구/청구별 파일(청구_○월, 청구별_○월)이 없습니다.")
     else:
-        curr = max(claim_months)
-        prev_candidates = [m for m in claim_months if m < curr]
-        prev = max(prev_candidates) if prev_candidates else None
-        st.caption(f"자동 인식 → 당월: **{curr}월**, 전달: **{prev or '없음'}**")
+        curr_claim = max(claim_months)
+        prev_claim = max([m for m in claim_months if m < curr_claim], default=None)
+        st.caption(f"자동 인식 → 당월: **{curr_claim}월**, 전달: **{prev_claim or '없음'}**")
         cc1, cc2 = st.columns(2)
         with cc1:
             if st.button("보험구분 기준 비교 실행"):
                 try:
-                    prev_df = cat(buckets["claim"].get(prev, []))
-                    curr_df = cat(buckets["claim"].get(curr, []))
+                    prev_df = cat(buckets["claim"].get(prev_claim, []))
+                    curr_df = cat(buckets["claim"].get(curr_claim, []))
                     if prev_df.empty or curr_df.empty:
                         st.error("비교에 필요한 월 데이터가 부족합니다.")
                     else:
@@ -265,14 +246,14 @@ with c2:
                             use_container_width=True,
                         )
                         st.session_state["out_ins"] = out
-                        st.session_state["out_ins_months"] = (prev, curr)
+                        st.session_state["out_ins_months"] = (prev_claim, curr_claim)
                 except Exception as e:
                     st.exception(e)
         with cc2:
             if st.button("입원외래 기준 비교 실행"):
                 try:
-                    prev_df = cat(buckets["claim"].get(prev, []))
-                    curr_df = cat(buckets["claim"].get(curr, []))
+                    prev_df = cat(buckets["claim"].get(prev_claim, []))
+                    curr_df = cat(buckets["claim"].get(curr_claim, []))
                     if prev_df.empty or curr_df.empty:
                         st.error("비교에 필요한 월 데이터가 부족합니다.")
                     else:
@@ -289,9 +270,69 @@ with c2:
                             use_container_width=True,
                         )
                         st.session_state["out_io"] = out
-                        st.session_state["out_io_months"] = (prev, curr)
+                        st.session_state["out_io_months"] = (prev_claim, curr_claim)
                 except Exception as e:
                     st.exception(e)
+
+# ------------------- 합계 일관성 검증 -------------------
+st.markdown("---")
+st.subheader("✅ 합계 일관성 검증 (외래·입원 = 보험구분 = 과목구분)")
+
+all_months = sorted(set(buckets["doctor"].keys()) | set(buckets["claim"].keys()))
+if not all_months:
+    st.info("검증할 데이터가 없습니다. (파일을 업로드하세요)")
+else:
+    curr = max(all_months)
+    prev = max([m for m in all_months if m < curr], default=None)
+
+    def total_for_month(m: Optional[int], kind: str, by: str) -> Optional[float]:
+        if m is None:
+            return None
+        dfs = buckets[kind].get(m, [])
+        if not dfs:
+            return None
+        df = cat(dfs)
+        g = group_sum(df, by)
+        return float(g["청구액"].sum()) if not g.empty else 0.0
+
+    def reconcile_row(m: Optional[int]):
+        if m is None:
+            return None
+        doc_total = total_for_month(m, "doctor", "과목구분")
+        ins_total = total_for_month(m, "claim", "보험구분")
+        io_total  = total_for_month(m, "claim", "입원외래")
+
+        values = [v for v in [doc_total, ins_total, io_total] if v is not None]
+        if not values:
+            status = "데이터 없음"
+            gap = None
+        else:
+            vmax, vmin = max(values), min(values)
+            gap = vmax - vmin
+            status = "OK" if gap == 0 else "불일치"
+        return {
+            "월": f"{m}월",
+            "의사별(과목구분) 합계": None if doc_total is None else f"{doc_total:,.0f}",
+            "청구(보험구분) 합계": None if ins_total is None else f"{ins_total:,.0f}",
+            "청구(입원외래) 합계": None if io_total is None else f"{io_total:,.0f}",
+            "최대-최소 차이": "" if gap is None else f"{gap:,.0f}",
+            "일치여부": status,
+        }
+
+    rows = []
+    rows.append(reconcile_row(curr))
+    if prev is not None:
+        rows.append(reconcile_row(prev))
+
+    df_check = pd.DataFrame([r for r in rows if r is not None])
+    if not df_check.empty:
+        st.dataframe(df_check, use_container_width=True)
+        if (df_check["일치여부"] == "OK").all():
+            st.success("당월/전달 모두 합계가 일치합니다. (외래·입원 = 보험구분 = 과목구분)")
+        else:
+            st.error("합계 불일치가 있습니다. 업로드 파일(월/구분/시트)과 컬럼 매핑을 확인하세요.")
+    else:
+        st.info("검증할 행이 없습니다. (데이터 부족)")
 
 # ------------------- 엑셀 다운로드 -------------------
 st.markdown("---")
@@ -324,6 +365,7 @@ try:
         st.info("먼저 상단에서 비교 실행 버튼을 눌러 결과를 생성하세요.")
 except Exception as e:
     st.exception(e)
+
     st.exception(e)
     st.code("\n".join(traceback.format_exc().splitlines()[-20:]), language="python")
 
