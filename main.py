@@ -147,8 +147,8 @@ def compare(prev_df: pd.DataFrame, curr_df: pd.DataFrame) -> pd.DataFrame:
     merged = pd.merge(prev_df, curr_df, on="구분", how="outer", suffixes=("_전달","_당월")).fillna(0)
     merged["증감"] = merged["청구액_당월"] - merged["청구액_전달"]
     def mark(x):
-        if x > 0: return f"▼{int(abs(x)):,}"
-        if x < 0: return f"▲{int(abs(x)):,}"
+        if x > 0: return f"▲{int(abs(x)):,}"
+        if x < 0: return f"▼{int(abs(x)):,}"
         return "—"
     merged["증감(기호)"] = merged["증감"].apply(mark)
     cols = ["구분","청구액_전달","청구액_당월","증감(기호)","증감"]
